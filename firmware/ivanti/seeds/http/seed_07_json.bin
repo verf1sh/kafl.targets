@@ -1,0 +1,7 @@
+POST /dana-na/auth/api.cgi HTTP/1.1
+Host: 127.0.0.1:443
+User-Agent: AnyConnect
+Content-Type: application/json
+Content-Length: 31
+
+{"action":"login","user":"test"}

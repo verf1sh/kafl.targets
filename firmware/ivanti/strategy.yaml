@@ -1,0 +1,138 @@
+# kAFL Fuzz Strategy — Ivanti Connect Secure
+# 使用: 被 strategy_mutator 读取做字段级变异 + Bandit 调度
+
+target:
+  name: "Ivanti Connect Secure"
+  cve:
+    - CVE-2025-22457
+    - CVE-2025-0282
+  protocol: TLS
+  port: 443
+
+# ── 包序列 ────────────────────────────────────────────────────────
+sequence:
+  # --- IFT-TLS 多包模式 (默认) ---
+  - role: prefix
+    file: "./seeds/ift/ift_http_upgrade.bin"
+    description: "HTTP upgrade to IF-T/TLS"
+
+  - role: prefix
+    file: "./seeds/ift/ift_version_nego.bin"
+    description: "IFT version negotiation"
+
+  - role: fuzz
+    template: "ift_binary"
+    description: "Binary key=value protocol with clientCapabilities"
+
+  # --- CVE-2025-22457 (单包 HTTP 模式) ---
+  # 注释掉上面三个，取消下面注释即可切换
+  # - role: fuzz
+  #   template: "http_request"
+
+# ── 协议模版 ──────────────────────────────────────────────────────
+templates:
+
+  http_request:
+    parser: http
+    description: "Standard HTTP/1.1 request"
+    max_total_len: 16384
+    fields:
+      - name: method
+        type: choice
+        mutation_lib: ["GET", "POST", "PUT", "DELETE", "HEAD", "OPTIONS",
+                       "PATCH", "TRACE", "CONNECT",
+                       "AAAAAA...", "%s%s%s%s", "../../../"]
+
+      - name: uri
+        type: string
+        max_len: 2048
+
+      - name: headers
+        type: kv_table
+        autofix: ["Content-Length"]
+
+      - name: body
+        type: binary
+        max_len: 65536
+
+  ift_binary:
+    parser: key_value
+    delimiter: " "
+    kv_separator: "="
+    max_total_len: 16384
+    description: "IFT-TLS binary protocol (16B header + key=value pairs)"
+
+    header:
+      - name: vendor_id
+        offset: 0
+        size: 4
+        type: int32_be
+        default: 0x00000a4c
+        mutable: false
+
+      - name: field_1
+        offset: 4
+        size: 4
+        type: int32_be
+        default: 0x00000088
+        mutable: false
+
+      - name: total_len
+        offset: 8
+        size: 4
+        type: int32_be
+        autofix: true
+
+      - name: seq_id
+        offset: 12
+        size: 4
+        type: int32_be
+        default: 1
+        mutable: false
+
+    fields:
+      - name: clientHostName
+        type: string
+        max_len: 32
+        strategy: long_string
+
+      - name: clientIp
+        type: string
+        max_len: 32
+        strategy: long_string
+
+      - name: clientCapabilities
+        type: string
+        max_len: 16384
+        strategy: long_string
+
+  json_payload:
+    parser: json
+    max_len: 65536
+    fields:
+      - name: "action"
+        type: string
+        mutation_lib: ["login", "logout", "reboot", "shutdown", "exec"]
+
+      - name: "params.username"
+        type: string
+        max_len: 256
+
+      - name: "params.count"
+        type: int
+        min: -2147483648
+        max: 2147483647
+        edge_values: [0, -1, 1, 65535, 2147483647, -2147483648]
+
+      - name: "payload"
+        type: binary
+        max_len: 1024
+
+  raw_binary:
+    parser: raw
+    max_total_len: 1048576
+    fields:
+      - name: blob
+        offset: 0
+        size: -1
+        type: binary

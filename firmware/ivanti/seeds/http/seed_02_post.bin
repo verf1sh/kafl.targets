@@ -1,0 +1,7 @@
+POST /dana-na/auth/url_default/welcome.cgi HTTP/1.1
+Host: 127.0.0.1:443
+User-Agent: Mozilla/5.0
+Content-Type: application/x-www-form-urlencoded
+Content-Length: 27
+
+username=admin&password=test

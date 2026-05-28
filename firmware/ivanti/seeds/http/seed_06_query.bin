@@ -1,0 +1,6 @@
+GET /dana-na/auth/url_default/login.cgi?realm=Admin&token=AAAA&user=test&tzo=-480 HTTP/1.1
+Host: 127.0.0.1:443
+User-Agent: AnyConnect
+X-Forwarded-For: 127.0.0.1
+Content-Length: 0
+

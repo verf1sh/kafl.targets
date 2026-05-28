@@ -1,0 +1,7 @@
+GET / HTTP/1.1
+Host: 127.0.0.1:443
+User-Agent: AnyConnect
+X-Forwarded-For: 192.168.1.1
+X-Forwarded-For: 10.0.0.1
+Content-Length: 0
+

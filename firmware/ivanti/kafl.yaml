@@ -1,0 +1,51 @@
+# kAFL configuration for Ivanti Connect Secure (firmware fuzzing)
+#
+# Usage:
+#   source kafl/env.sh
+#   kafl fuzz --config kafl.yaml -w /tmp/ivanti_fuzz
+#
+# Prerequisites:
+#   - qcow2 image with Ivanti OS installed
+#   - tap0 network interface configured on host
+#   - PT trace range (ip0) determined from /proc/<pid>/maps inside VM
+
+qemu_path: $QEMU_ROOT/x86_64-softmmu/qemu-system-x86_64
+ptdump_path: $LIBXDC_ROOT/build/ptdump_static
+radamsa_path: $RADAMSA_ROOT/bin/radamsa
+
+# ── TODO: 填写你的 qcow2 镜像路径 ─────────────────────────────────
+qemu_image: /path/to/Ivanti.qcow2
+qemu_memory: 4096
+
+# ── QEMU 基础参数 ────────────────────────────────────────────────
+qemu_base: -enable-kvm -machine kAFL64-v1 -cpu kAFL64-Hypervisor,+vmx -no-reboot -display none
+
+# 串口（telnet 127.0.0.1 4444 连接）
+qemu_serial: -serial telnet:127.0.0.1:4444,server,nowait
+
+# QEMU monitor + tap 网卡（需配置 tap0）
+qemu_extra: -monitor tcp:127.0.0.1:55555,server,nowait -netdev tap,id=net0,ifname=tap0,script=no,downscript=no -device e1000,netdev=net0
+
+# ── TODO: 填写 PT trace 范围 ─────────────────────────────────────
+# 在 VM 内运行: cat /proc/$(pidof web)/maps | head -5
+# 然后填写 web 守护进程所在的地址范围
+#ip0: 0x56000000-0x58000000
+
+# ── 变异器配置 ───────────────────────────────────────────────────
+# 禁用 AFL 确定性阶段（bitflip/arith/int），纯自定义变异器
+afl_dumb_mode: true
+
+# 禁用 kickstart — 随机字节注入会破坏协议结构
+kickstart: 0
+
+# 启用 Radamsa 作为额外变异阶段
+radamsa: true
+
+# ── 自定义变异器 (firmware-fuzz) ─────────────────────────────────
+custom_mutator: strategy_mutator
+
+# strategy.yaml 路径（相对当前目录）
+strategy_config: ./strategy.yaml
+
+# 种子目录
+seed_dir: ./seeds
