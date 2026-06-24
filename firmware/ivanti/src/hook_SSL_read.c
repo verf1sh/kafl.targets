@@ -1,6 +1,9 @@
 /*
  * hook_SSL_read.c — LD_PRELOAD hook for kAFL fuzzing
- * edit by verf1sh: network-injection mode (SSL_write) with SHM fallback for multi-packet
+ * edit by verf1sh:
+ *   - network-injection mode (SSL_write) with SHM fallback for multi-packet
+ *   - INTEGRATED command-injection detection (system/popen/exec* hook)
+ *   - crash classification (CRASH_CMD_INJECT vs CRASH_REAL)
  *
  * Two modes (auto-selected by agent via g_state->ready):
  *   1. Network injection (ready=0): agent sends fuzz data via SSL_write.
@@ -11,14 +14,19 @@
  * Network injection is the default — avoids deadlock when web daemon
  * is stuck in orig_SSL_read blocking on the real socket.
  *
- * data[] 布局 (v3, SHM mode only):
+ * data[] layout (v3, SHM mode only):
  *   [0..3]   magic:  0x4B41464C
  *   [4..7]   packet_count (1-5)
  *   [8..11]  reserved
  *   [12..31] packet_sizes[0..4]
  *   [32..]   concatenated packet data
  *
- * 编译: make hook
+ * Command injection detection:
+ *   Hooked: system(), popen(), execve(), execvp()
+ *   Taint marker prefix: "KAFL_CMDINJ_"
+ *   On detection: g_state->crash_reason = CRASH_CMD_INJECT, then PANIC.
+ *
+ * Compile: make hook
  */
 
 #define _GNU_SOURCE
@@ -31,19 +39,50 @@
 #include <sys/mman.h>
 #include <fcntl.h>
 #include <signal.h>
+#include <stdarg.h>
+#include <errno.h>
 
-#define SHM_NAME "/kafl_hook_shm"
-#define MAX_PAYLOAD         (1 * 1024 * 1024)
-#define SHM_MAGIC           0x4B41464C
+#include "hook_common.h"
+
+/* ---- SSL 句柄 -------------------------------------------------------- */
+struct ssl_st;
+typedef struct ssl_st SSL;
+
+static int (*orig_SSL_read)(SSL *, void *, int) = NULL;
+static int (*orig_SSL_write)(SSL *, const void *, int) = NULL;
+static int (*orig_close)(int) = NULL;
+
+/* ---- Command injection hooks ---------------------------------------- */
+static int (*orig_system)(const char *) = NULL;
+static FILE *(*orig_popen)(const char *, const char *) = NULL;
+static int (*orig_execve)(const char *, char *const[], char *const[]) = NULL;
+static int (*orig_execvp)(const char *, char *const[]) = NULL;
+
+static struct hook_state *g_state = NULL;
+
+static volatile int cr3_submitted = 0;
+static volatile int need_release  = 0;
+
+/* ---- Taint detection ------------------------------------------------ */
+#define TAINT_PREFIX "KAFL_CMDINJ_"
+#define TAINT_PREFIX_LEN (sizeof(TAINT_PREFIX) - 1)
+
+static inline int taint_detected(const char *s)
+{
+    return (s && strstr(s, TAINT_PREFIX) != NULL);
+}
+
+static inline int taint_detected_argv(char *const argv[])
+{
+    if (!argv) return 0;
+    for (int i = 0; argv[i]; i++) {
+        if (taint_detected(argv[i]))
+            return 1;
+    }
+    return 0;
+}
 
 /* ---- kAFL hypercall ------------------------------------------------- */
-#define HYPERCALL_KAFL_RAX_ID       0x01f
-#define HYPERCALL_KAFL_RELEASE      0x04
-#define HYPERCALL_KAFL_SUBMIT_CR3   0x05
-#define HYPERCALL_KAFL_PANIC        0x08
-
-#define MAX_PACKETS 5
-
 static inline void kAFL_vmcall(unsigned long id, unsigned long arg)
 {
     unsigned long nr = HYPERCALL_KAFL_RAX_ID;
@@ -55,34 +94,16 @@ static inline void kAFL_vmcall(unsigned long id, unsigned long arg)
     );
 }
 
-/* ---- 共享内存 (与 agent 保持一致) -------------------------------------- */
-struct hook_state {
-    int ready;
-    int consumed;
-    int size;
-    int prefix_phase;
-    char data[MAX_PAYLOAD];
-};
-
-/* ---- 内嵌在 data[] 中的头部 (v3 SHM 格式) ----------------------------- */
-struct shm_header {
-    uint32_t magic;
-    uint32_t packet_count;
-    uint32_t reserved;
-    uint32_t packet_sizes[MAX_PACKETS];
-};
-
-/* ---- SSL 句柄 -------------------------------------------------------- */
-struct ssl_st;
-typedef struct ssl_st SSL;
-
-static int (*orig_SSL_read)(SSL *, void *, int) = NULL;
-static int (*orig_SSL_write)(SSL *, const void *, int) = NULL;
-static int (*orig_close)(int) = NULL;
-static struct hook_state *g_state = NULL;
-
-static volatile int cr3_submitted = 0;
-static volatile int need_release  = 0;
+/* ---- Command-injection panic ---------------------------------------- */
+static void cmdinject_panic(void)
+{
+    if (g_state) {
+        g_state->crash_reason = CRASH_CMD_INJECT;
+    }
+    kAFL_vmcall(HYPERCALL_KAFL_PANIC, 0);
+    /* If PANIC hypercall returns (should not), force SIGSEGV */
+    raise(SIGSEGV);
+}
 
 /* ---- 初始化 ----------------------------------------------------------- */
 static void init_shm(void)
@@ -118,6 +139,11 @@ static void do_release(void)
         need_release = 0;
         return;
     }
+    if (g_state && g_state->suppress_release) {
+        need_release = 0;
+        g_state->consumed = 1;
+        return;
+    }
     need_release = 0;
     kAFL_vmcall(HYPERCALL_KAFL_RELEASE, 0);
     if (g_state) g_state->consumed = 1;
@@ -125,6 +151,12 @@ static void do_release(void)
 
 static void crash_handler(int sig)
 {
+    if (g_state) {
+        /* If crash_reason is already set to CMD_INJECT, keep it.
+         * Otherwise mark as a real crash (memory safety bug). */
+        if (g_state->crash_reason == CRASH_NONE)
+            g_state->crash_reason = CRASH_REAL;
+    }
     kAFL_vmcall(HYPERCALL_KAFL_PANIC, 0);
     _exit(128 + sig);
 }
@@ -253,6 +285,113 @@ int close(int fd)
     }
     int ret = orig_close(fd);
     do_release();
+    return ret;
+}
+
+/* =====================================================================
+ * Command Injection Detection Hooks
+ * ===================================================================== */
+
+int system(const char *cmd)
+{
+    if (!orig_system) {
+        orig_system = (int (*)(const char *))dlsym(RTLD_NEXT, "system");
+        if (!orig_system) return -1;
+    }
+
+    if (taint_detected(cmd)) {
+        cmdinject_panic();
+        /* unreachable */
+        return -1;
+    }
+    return orig_system(cmd);
+}
+
+FILE *popen(const char *cmd, const char *type)
+{
+    if (!orig_popen) {
+        orig_popen = (FILE *(*)(const char *, const char *))dlsym(RTLD_NEXT, "popen");
+        if (!orig_popen) return NULL;
+    }
+
+    if (taint_detected(cmd)) {
+        cmdinject_panic();
+        /* unreachable */
+        return NULL;
+    }
+    return orig_popen(cmd, type);
+}
+
+int execve(const char *path, char *const argv[], char *const envp[])
+{
+    if (!orig_execve) {
+        orig_execve = (int (*)(const char *, char *const[], char *const[]))
+            dlsym(RTLD_NEXT, "execve");
+        if (!orig_execve) {
+            errno = ENOSYS;
+            return -1;
+        }
+    }
+
+    if (taint_detected(path) || taint_detected_argv(argv)) {
+        cmdinject_panic();
+        /* unreachable */
+        return -1;
+    }
+    return orig_execve(path, argv, envp);
+}
+
+int execvp(const char *file, char *const argv[])
+{
+    if (!orig_execvp) {
+        orig_execvp = (int (*)(const char *, char *const[]))
+            dlsym(RTLD_NEXT, "execvp");
+        if (!orig_execvp) {
+            errno = ENOSYS;
+            return -1;
+        }
+    }
+
+    if (taint_detected(file) || taint_detected_argv(argv)) {
+        cmdinject_panic();
+        /* unreachable */
+        return -1;
+    }
+    return orig_execvp(file, argv);
+}
+
+/* execl() is variadic and tricky to hook portably in 32-bit.
+ * In practice, execl() calls execve() internally, so hooking execve()
+ * covers the real execution path.  We provide a weak symbol fallback
+ * in case the target binary links execl directly. */
+int execl(const char *path, const char *arg, ...)
+{
+    /* Fallback: convert to execv() style and call our hooked execve().
+     * This is a simplified version; real glibc execl does locale
+     * cleanup before execve.  Sufficient for taint detection. */
+    va_list ap;
+    int argc = 1;
+
+    va_start(ap, arg);
+    while (va_arg(ap, const char *))
+        argc++;
+    va_end(ap);
+
+    char **argv = calloc(argc + 1, sizeof(char *));
+    if (!argv) {
+        errno = ENOMEM;
+        return -1;
+    }
+
+    argv[0] = (char *)arg;
+    va_start(ap, arg);
+    for (int i = 1; i < argc; i++)
+        argv[i] = (char *)va_arg(ap, const char *);
+    va_end(ap);
+    argv[argc] = NULL;
+
+    int ret = execve(path, argv, environ);
+    free(argv);
     return ret;
 }
 

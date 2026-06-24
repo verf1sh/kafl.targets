@@ -1,6 +1,0 @@
-GET / HTTP/1.1
-Host: 127.0.0.1:443
-User-Agent: AnyConnect-compatible OpenConnect VPN Agent v9.12-188-gaebfabb3-dirty
-X-Forwarded-For: 
-Content-Length: 0
-

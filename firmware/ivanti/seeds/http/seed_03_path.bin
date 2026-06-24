@@ -1,6 +1,0 @@
-GET /dana-na/../dana-na/auth/login.cgi HTTP/1.1
-Host: 127.0.0.1:443
-User-Agent: AnyConnect-compatible OpenConnect VPN Agent v9.12-188-gaebfabb3-dirty
-X-Forwarded-For: 10.0.0.1
-Content-Length: 0
-

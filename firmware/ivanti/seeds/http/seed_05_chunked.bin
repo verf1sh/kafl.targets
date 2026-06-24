@@ -1,7 +1,0 @@
-GET /dana-na/help/help.html HTTP/1.1
-Host: 127.0.0.1:443
-User-Agent: AnyConnect
-Transfer-Encoding: chunked
-X-Forwarded-For: 172.16.0.1
-Content-Length: 0
-

@@ -1,7 +1,0 @@
-GET /dana-na/index.html HTTP/1.1
-Host: 127.0.0.1:443
-User-Agent: AnyConnect
-Cookie: DSSIGNIN=admin; DSID=AAAA; SESSION=test
-X-Forwarded-For: 10.10.10.10
-Content-Length: 0
-

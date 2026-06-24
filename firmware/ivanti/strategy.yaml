@@ -3,136 +3,245 @@
 
 target:
   name: "Ivanti Connect Secure"
-  cve:
-    - CVE-2025-22457
-    - CVE-2025-0282
   protocol: TLS
   port: 443
+  campaign: "pre-auth Type 0x88 EPMessage"
+  known_crashes_excluded:
+    - CVE-2025-0282
 
 # ── 包序列 ────────────────────────────────────────────────────────
 sequence:
-  # --- IFT-TLS 多包模式 (默认) ---
+  # --- IF-T/TLS 连接建立 (prefix, 不变异) ---
   - role: prefix
-    file: "./seeds/ift/ift_http_upgrade.bin"
-    description: "HTTP upgrade to IF-T/TLS"
+    file: "/home/verf1sh/fuzzing/kAFL/kafl/examples/firmware/ivanti/prefix/ift_http_upgrade.bin"
+    description: "HTTP Upgrade → 101 Switching Protocols"
 
   - role: prefix
-    file: "./seeds/ift/ift_version_nego.bin"
-    description: "IFT version negotiation"
+    file: "/home/verf1sh/fuzzing/kAFL/kafl/examples/firmware/ivanti/prefix/ift_version_nego.bin"
+    description: "Vendor 0x5597 Type 1 → Type 2 版本协商"
+
+  # --- 主 Fuzz 模板: 单个 IF-T/TLS 帧，header/body 字段级变异 ---
+  - role: fuzz
+    template: "ift_fuzz"
+    description: "Pre-auth Type 0x88: IF-T header/body/KV 字段级变异"
 
   - role: fuzz
-    template: "ift_binary"
-    description: "Binary key=value protocol with clientCapabilities"
-
-  # --- CVE-2025-22457 (单包 HTTP 模式) ---
-  # 注释掉上面三个，取消下面注释即可切换
-  # - role: fuzz
-  #   template: "http_request"
+    template: "ift_eap_type6"
+    description: "Pre-auth/auth handshake Type 6: EAP inner length mismatch"
 
 # ── 协议模版 ──────────────────────────────────────────────────────
 templates:
 
-  http_request:
-    parser: http
-    description: "Standard HTTP/1.1 request"
-    max_total_len: 16384
-    fields:
-      - name: method
-        type: choice
-        mutation_lib: ["GET", "POST", "PUT", "DELETE", "HEAD", "OPTIONS",
-                       "PATCH", "TRACE", "CONNECT",
-                       "AAAAAA...", "%s%s%s%s", "../../../"]
-
-      - name: uri
-        type: string
-        max_len: 2048
-
-      - name: headers
-        type: kv_table
-        autofix: ["Content-Length"]
-
-      - name: body
-        type: binary
-        max_len: 65536
-
-  ift_binary:
-    parser: key_value
-    delimiter: " "
-    kv_separator: "="
-    max_total_len: 16384
-    description: "IFT-TLS binary protocol (16B header + key=value pairs)"
+  # ===== Type 0x88 主线: 单帧 IF-T/TLS，固定 vendor/type，变异长度/id/body/KV =====
+  ift_fuzz:
+    parser: raw
+    max_total_len: 65536
+    description: "IF-T/TLS Type 0x88 pre-auth EPMessage — body/KV targeted mutation"
 
     header:
       - name: vendor_id
         offset: 0
         size: 4
         type: int32_be
-        default: 0x00000a4c
+        default: 0x00000A4C
         mutable: false
 
-      - name: field_1
+      - name: message_type
         offset: 4
         size: 4
         type: int32_be
         default: 0x00000088
         mutable: false
 
-      - name: total_len
+      - name: total_length
         offset: 8
         size: 4
         type: int32_be
         autofix: true
+        mutable: false
 
-      - name: seq_id
+      - name: message_id
         offset: 12
         size: 4
         type: int32_be
         default: 1
-        mutable: false
+        strategy: int_boundary
+        mutable: true
 
     fields:
+      - name: body
+        offset: 16
+        size: -1
+        type: binary
+        max_len: 65520
+        strategies: [bitflip, byte_insert, byte_remove, byte_replace, random_overwrite]
+
+      # Type 0x88 EPMessage fields.  They are optional: if a seed does not
+      # contain these keys, the raw body field still drives mutation.
       - name: clientHostName
         type: string
-        max_len: 32
-        strategy: long_string
+        max_len: 2048
+        strategies: [default, long_string, cmd_inject_taint, epmessage_delim, kv_key_confusion, percent_escape]
 
       - name: clientIp
         type: string
-        max_len: 32
-        strategy: long_string
+        max_len: 512
+        strategies: [default, ip_literal, cmd_inject_taint, epmessage_delim, percent_escape]
 
-      - name: clientCapabilities
-        type: string
-        max_len: 16384
-        strategy: long_string
-
-  json_payload:
-    parser: json
-    max_len: 65536
-    fields:
-      - name: "action"
-        type: string
-        mutation_lib: ["login", "logout", "reboot", "shutdown", "exec"]
-
-      - name: "params.username"
-        type: string
-        max_len: 256
-
-      - name: "params.count"
-        type: int
-        min: -2147483648
-        max: 2147483647
-        edge_values: [0, -1, 1, 65535, 2147483647, -2147483648]
-
-      - name: "payload"
+      # Virtual EPMessage structure fields. These mutate the whole body but
+      # are exposed as separate scheduler targets so coverage feedback can
+      # learn whether duplicate keys, malformed tokens, case changes, or
+      # hidden delimiters are more productive.
+      - name: ep_extra_token
+        source: body
         type: binary
-        max_len: 1024
+        max_len: 4096
+        strategies: [ep_extra_token]
 
-  raw_binary:
+      - name: ep_duplicate_key
+        source: body
+        type: binary
+        max_len: 4096
+        strategies: [ep_duplicate_key]
+
+      - name: ep_key_case
+        source: body
+        type: binary
+        max_len: 4096
+        strategies: [ep_key_case]
+
+      - name: ep_malformed_token
+        source: body
+        type: binary
+        max_len: 4096
+        strategies: [ep_malformed_token]
+
+      - name: ep_percent_escape
+        source: body
+        type: binary
+        max_len: 4096
+        strategies: [ep_percent_escape]
+
+      - name: ep_terminator
+        source: body
+        type: binary
+        max_len: 4096
+        strategies: [ep_terminator]
+
+      - name: ep_field_order
+        source: body
+        type: binary
+        max_len: 4096
+        strategies: [ep_field_order]
+
+  # ===== Vendor 0x5597 Type 6: Ivanti client auth response carrying EAP =====
+  # Static target:
+  #   sub_E32D0 checks payload[0:3] == 0x000A4C and payload[3] == 1,
+  #   then forwards payload+4,len-4 into sub_D32D0.  That EAP path reads
+  #   an inner big-endian length; this template stresses declared length
+  #   vs actual body size without touching the known clientCapabilities CVE.
+  ift_eap_type6:
     parser: raw
-    max_total_len: 1048576
-    fields:
-      - name: blob
+    max_total_len: 4096
+    description: "Vendor 0x5597 Type 6 client-auth response: EAP length mismatch"
+
+    header:
+      - name: vendor_id
         offset: 0
+        size: 4
+        type: int32_be
+        default: 0x00005597
+        mutable: false
+
+      - name: message_type
+        offset: 4
+        size: 4
+        type: int32_be
+        default: 0x00000006
+        mutable: false
+
+      - name: total_length
+        offset: 8
+        size: 4
+        type: int32_be
+        autofix: true
+        mutable: false
+
+      - name: message_id
+        offset: 12
+        size: 4
+        type: int32_be
+        default: 2
+        strategy: int_boundary
+        mutable: true
+
+    fields:
+      - name: auth_vendor
+        offset: 16
+        size: 3
+        type: binary
+        default: "000a4c"
+        mutable: false
+
+      - name: auth_type
+        offset: 19
+        size: 1
+        type: int8
+        default: 1
+        mutable: false
+
+      - name: eap_body
+        offset: 20
         size: -1
         type: binary
+        max_len: 2048
+        strategies: [eap_len_mismatch, byte_insert, byte_remove, byte_replace, random_overwrite]
+
+      - name: eap_code
+        source: eap_body
+        view: eap
+        eap_offset: 0
+        size: 1
+        type: int8
+        min: 0
+        max: 255
+        strategy: int_boundary
+
+      - name: eap_id
+        source: eap_body
+        view: eap
+        eap_offset: 1
+        size: 1
+        type: int8
+        min: 0
+        max: 255
+        strategy: int_boundary
+
+      - name: eap_length
+        source: eap_body
+        view: eap
+        eap_offset: 2
+        size: 2
+        type: int16
+        min: 0
+        max: 65535
+        strategy: eap_len_field
+
+      - name: eap_type
+        source: eap_body
+        view: eap
+        eap_offset: 4
+        size: 1
+        type: int8
+        min: 0
+        max: 255
+        strategy: int_boundary
+
+      - name: eap_data
+        source: eap_body
+        view: eap
+        eap_offset: 5
+        size: -1
+        type: binary
+        max_len: 1024
+        strategies: [byte_insert, byte_remove, byte_replace, random_overwrite]

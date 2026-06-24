@@ -1,2 +1,8 @@
 agent
 hook_SSL_read.so
+dsagentd
+strategy.txt
+strategy_*.txt
+*.log
+__pycache__/
+*.pyc
