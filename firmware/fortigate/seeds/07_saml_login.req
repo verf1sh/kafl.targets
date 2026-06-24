@@ -1,0 +1,8 @@
+GET /saml/login?SAMLRequest=AAAA&RelayState=%2Fng%2F HTTP/1.1
+Host: 127.0.0.1
+User-Agent: Mozilla/5.0 kAFL-FortiGate
+Accept: text/html,application/xhtml+xml
+Connection: close
+X-Forwarded-For: 127.0.0.1
+Cookie: APSCOOKIE=AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA
+

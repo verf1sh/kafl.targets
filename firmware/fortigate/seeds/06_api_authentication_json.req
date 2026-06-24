@@ -1,0 +1,10 @@
+POST /api/v2/authentication HTTP/1.1
+Host: 127.0.0.1
+User-Agent: Mozilla/5.0 kAFL-FortiGate
+Accept: application/json
+Content-Type: application/json
+Content-Length: 45
+Connection: close
+X-Forwarded-For: 127.0.0.1
+
+{"username":"admin","secretkey":"","ajax":1}

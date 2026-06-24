@@ -1,0 +1,116 @@
+# kAFL Fuzz Strategy — FortiGate FortiOS 7.4.3 httpsd pre-auth
+# Target: /bin/httpsd (Apache-based, 64-bit, multi-process prefork)
+# Protocol: Plain HTTP on :9980 (wad terminates TLS on :443, forwards HTTP)
+#
+# Strategy names MUST match template_engine.py:
+#   string: default, long_string, cmd_inject_taint, http_path,
+#           http_cookie_value, http_cookie_struct, http_form_value,
+#           http_form_struct, http_query_struct, http_content_type,
+#           http_header_ip, http_header_list, ip_literal, percent_escape
+#   binary: default, bitflip, byte_remove, byte_insert,
+#           byte_replace, random_overwrite
+#   int:    default
+
+target:
+  name: "FortiGate FortiOS 7.4.3"
+  protocol: HTTP
+  port: 9980
+  campaign: "pre-auth httpsd HTTP request fuzz"
+  known_crashes_excluded: []
+
+# ── 包序列 ────────────────────────────────────────────────────────
+sequence:
+  - role: fuzz
+    template: "http_request"
+    description: "HTTP request line + headers + optional body"
+
+# ── 协议模版 ──────────────────────────────────────────────────────
+templates:
+
+  http_request:
+    parser: http
+    # httpsd reaches the HTTP request at read(fd, buf, 0x1f40); keep one
+    # fuzz request within that read so the hook can replace it atomically.
+    max_total_len: 8000
+    description: "HTTP request — method/URI/version + headers + body"
+
+    header:
+      - name: method
+        offset: 0
+        size: -1
+        type: string
+        delimiter: " "
+        max_len: 16
+        default: "GET"
+        mutable: false
+
+      - name: uri
+        offset: -1
+        size: -1
+        type: string
+        delimiter: " "
+        max_len: 4096
+        default: "/"
+        strategies: [default, http_path, cmd_inject_taint, long_string]
+
+      - name: version
+        offset: -1
+        size: -1
+        type: string
+        delimiter: "\r\n"
+        max_len: 16
+        default: "HTTP/1.1"
+        mutable: false
+
+    fields:
+      # Field names below match TemplateEngine.parse_http():
+      #   header:Host        -> hdr_Host
+      #   header:User-Agent  -> hdr_User-Agent
+      # Missing headers are not synthesized; include them in seeds when
+      # you want these fields to participate in mutation.
+      - name: hdr_Host
+        type: string
+        max_len: 256
+        strategies: [default, long_string, cmd_inject_taint]
+
+      - name: hdr_User-Agent
+        type: string
+        max_len: 512
+        strategies: [default, long_string]
+
+      - name: hdr_Accept
+        type: string
+        max_len: 512
+        strategies: [default, http_header_list, long_string]
+
+      - name: hdr_Accept-Encoding
+        type: string
+        max_len: 256
+        strategies: [default, http_header_list, long_string]
+
+      - name: hdr_Content-Type
+        type: string
+        max_len: 256
+        strategies: [default, http_content_type, long_string]
+
+      - name: hdr_Cookie
+        type: string
+        max_len: 2048
+        strategies: [default, http_cookie_value, http_cookie_struct, long_string, cmd_inject_taint]
+
+      - name: hdr_X-Forwarded-For
+        type: string
+        max_len: 512
+        strategies: [default, http_header_ip, ip_literal, long_string]
+
+      - name: hdr_Connection
+        type: string
+        max_len: 64
+        strategies: [default, http_header_list]
+
+      - name: body
+        offset: -1
+        size: -1
+        type: binary
+        max_len: 4096
+        strategies: [bitflip, byte_insert, byte_remove, byte_replace, random_overwrite]

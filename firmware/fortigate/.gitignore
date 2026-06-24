@@ -1,0 +1,10 @@
+agent
+inject
+hook.so
+hook_dbg.so
+*.tar.gz
+*.qcow2
+strategy.txt
+*.log
+.gdb_history
+*.bak_*
